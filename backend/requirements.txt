@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+google-generativeai
+python-dotenv
+google-genai
+
+
+
+transformers
+torch 
+torchvision 
+torchaudio
