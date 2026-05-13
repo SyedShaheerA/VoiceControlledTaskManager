@@ -142,8 +142,7 @@ Schema:
   "intent": "CREATE" | "UPDATE" | "DELETE" | "READ" | "CHAT",
   "entities": {{
     "title": "Task title (CREATE only)",
-    "time_context": "Time string e.g. '6:00 PM' (CREATE or UPDATE)",
-    "date_context": "Date string e.g. 'today', 'tomorrow', or 'YYYY-MM-DD' (CREATE or UPDATE)",
+    "time_context": "Time string (CREATE or UPDATE)",
     "time_filter": "morning | afternoon | evening | night | today | tomorrow | all | null"
   }},
   "target_task_id": <integer id from the database, or null>,
@@ -152,8 +151,8 @@ Schema:
 }}
 
 Rules:
-- CREATE : fill entities.title, entities.time_context, and entities.date_context (default to today if not specified).
-- UPDATE : fill target_task_id. Fill only changed fields in entities (time_context and/or date_context).
+- CREATE : fill entities.title and entities.time_context.
+- UPDATE : fill target_task_id. Fill only changed fields in entities.
 - DELETE : fill target_task_id only.
 - READ   : Use entities.time_filter to filter tasks by time period.
            Summarise conversationally, e.g. 'You have a sync at 6 PM and a LinkedIn post at 8 PM.'
@@ -187,14 +186,14 @@ Positional references ('the first one', 'the second one', 'the last one'):
         # ── Execute DB action ──────────────────────────────────────────────────
         if intent == "CREATE":
             task_title = entities.get("title", "Untitled")
-            new_task   = create_task(task_title, entities.get("time_context", ""), entities.get("date_context", "today"))
+            new_task   = create_task(task_title, entities.get("time_context", ""))
             if isinstance(new_task, dict) and "id" in new_task:
                 session["last_task_id"]    = new_task["id"]
                 session["last_task_title"] = task_title
 
         elif intent == "UPDATE":
             if tid:
-                update_task(tid, new_time=entities.get("time_context"), new_date=entities.get("date_context"))
+                update_task(tid, new_time=entities.get("time_context"))
                 session["last_task_id"] = tid
                 matched = next((t for t in current_tasks if t.get("id") == tid), None)
                 session["last_task_title"] = matched["title"] if matched else None

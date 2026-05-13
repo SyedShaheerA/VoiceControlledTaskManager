@@ -1,16 +1,18 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import './App.css';
+
 function App() {
-  const [isListening, setIsListening] = useState(false);
+  const [isListening, setIsListening]   = useState(false);
   const [userTranscript, setUserTranscript] = useState("");
-  const [agentResponse, setAgentResponse] = useState("Waiting for you to speak...");
-  const [tasks, setTasks] = useState([]);
-  const [chatHistory, setChatHistory] = useState([]);
+  const [agentResponse, setAgentResponse]   = useState("Waiting for you to speak...");
+  const [tasks, setTasks]               = useState([]);
+  const [modelUsed, setModelUsed]       = useState("");
+
   const recognitionRef = useRef(null);
-  const transcriptRef = useRef("");
-  // FIX: hold chatHistory in a ref so sendToBackend never goes stale
-  const chatHistoryRef = useRef(chatHistory);
-  useEffect(() => { chatHistoryRef.current = chatHistory; }, [chatHistory]);
+  const transcriptRef  = useRef("");
+  const sessionIdRef   = useRef(null);   // server-side session ID
+
+  // ── Fetch tasks ─────────────────────────────────────────────────────────────
   const fetchTasks = useCallback(async () => {
     try {
       const response = await fetch('http://localhost:8000/api/tasks');
@@ -21,57 +23,85 @@ function App() {
     } catch (error) {
       console.error("Error fetching tasks:", error);
     }
-  }, []); // stable — no deps
+  }, []);
+
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
+
+  // ── TTS ──────────────────────────────────────────────────────────────────────
   const speakText = useCallback((text) => {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.0;
+    utterance.rate  = 1.0;
     utterance.pitch = 1.0;
     window.speechSynthesis.speak(utterance);
     setAgentResponse(text);
-  }, []); // stable
-  // FIX: wrap in useCallback with stable deps — reads history via ref, not closure
+  }, []);
+
+  // ── Send to backend ──────────────────────────────────────────────────────────
   const sendToBackend = useCallback(async (text) => {
     try {
       setAgentResponse("Thinking...");
-      const currentHistory = [...chatHistoryRef.current, { role: "user", text }];
+
+      const headers = { 'Content-Type': 'application/json' };
+      if (sessionIdRef.current) {
+        headers['X-Session-ID'] = sessionIdRef.current;
+      }
+
       const response = await fetch('http://localhost:8000/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ history: currentHistory }),
+        headers,
+        body: JSON.stringify({ text }),   // just the utterance — server owns history
       });
+
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
       const data = await response.json();
+
+      // Persist session ID for subsequent requests
+      if (data.session_id) {
+        sessionIdRef.current = data.session_id;
+      }
+
+      if (data.model_used) {
+        setModelUsed(data.model_used);
+      }
+
       speakText(data.tts_response);
       fetchTasks();
-      setChatHistory([...currentHistory, { role: "agent", text: data.tts_response }]);
+
     } catch (error) {
       console.error("Error talking to backend:", error);
       speakText("Sorry, I lost connection to the server.");
     }
-  }, [speakText, fetchTasks]); // stable deps only
-  // FIX: only recreate recognition when sendToBackend identity changes (rarely)
+  }, [speakText, fetchTasks]);
+
+  // ── Speech recognition ───────────────────────────────────────────────────────
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
     if (!SpeechRecognition) {
       alert("Your browser does not support the Web Speech API. Please use Google Chrome.");
       return;
     }
-    const recognition = new SpeechRecognition();
-    recognition.continuous = false;
+
+    const recognition         = new SpeechRecognition();
+    recognition.continuous    = false;
     recognition.interimResults = true;
-    recognition.lang = 'en-US';
+    recognition.lang          = 'en-US';
+
     recognition.onresult = (event) => {
       window.speechSynthesis.cancel();
       setAgentResponse("Listening...");
+
       let currentTranscript = '';
       for (let i = event.resultIndex; i < event.results.length; ++i) {
         currentTranscript += event.results[i][0].transcript;
       }
+
       setUserTranscript(currentTranscript);
       transcriptRef.current = currentTranscript;
     };
+
     recognition.onend = () => {
       setIsListening(false);
       const finalUtterance = transcriptRef.current.trim();
@@ -80,9 +110,12 @@ function App() {
         transcriptRef.current = "";
       }
     };
+
     recognitionRef.current = recognition;
     return () => recognition.stop();
-  }, [sendToBackend]); // FIX: only sendToBackend — no chatHistory, no infinite loop
+  }, [sendToBackend]);
+
+  // ── Toggle mic ───────────────────────────────────────────────────────────────
   const toggleListening = () => {
     if (isListening) {
       recognitionRef.current.stop();
@@ -93,33 +126,61 @@ function App() {
         recognitionRef.current.start();
         setIsListening(true);
       } catch (error) {
-        console.error("Microphone is already started", error);
+        console.error("Microphone error:", error);
       }
     }
   };
+
+  // ── UI ───────────────────────────────────────────────────────────────────────
   return (
     <div className="app-container">
       <h1>Voice Task Manager</h1>
+
       <div className="status-box">
-        <p><strong>You said:</strong> {userTranscript}</p>
+        <p><strong>You said:</strong> {userTranscript || "—"}</p>
         <p><strong>Agent says:</strong> {agentResponse}</p>
+        {modelUsed && (
+          <p style={{ fontSize: '12px', color: '#888' }}>
+            Model: {modelUsed}
+          </p>
+        )}
       </div>
-      <button onClick={toggleListening} style={{
-        backgroundColor: isListening ? 'red' : 'green', color: 'white',
-        padding: '15px', fontSize: '18px', borderRadius: '50px', marginBottom: '20px'
-      }}>
-        {isListening ? "Stop Listening" : "Start Listening"}
+
+      <button
+        onClick={toggleListening}
+        style={{
+          backgroundColor: isListening ? 'red' : 'green',
+          color: 'white',
+          padding: '15px',
+          fontSize: '18px',
+          borderRadius: '50px',
+          marginBottom: '20px',
+          cursor: 'pointer',
+          border: 'none',
+        }}
+      >
+        {isListening ? "🎙 Stop Listening" : "🎤 Start Listening"}
       </button>
+
       <div className="task-list">
         <h2>Your Agenda</h2>
         {tasks.length === 0 ? (
           <p style={{ color: '#888' }}>No tasks scheduled yet.</p>
         ) : (
           tasks.map(task => (
-            <div key={task.id} className="task-item" style={{
-              padding: '15px', border: '1px solid #ddd', margin: '10px 0',
-              borderRadius: '8px', display: 'flex', justifyContent: 'space-between', background: '#fff'
-            }}>
+            <div
+              key={task.id}
+              className="task-item"
+              style={{
+                padding: '15px',
+                border: '1px solid #ddd',
+                margin: '10px 0',
+                borderRadius: '8px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                background: '#fff',
+              }}
+            >
               <span style={{ fontWeight: 'bold' }}>{task.title}</span>
               <span style={{ color: '#555' }}>{task.time_context}</span>
             </div>
@@ -129,6 +190,7 @@ function App() {
     </div>
   );
 }
+
 export default App;
 
 
