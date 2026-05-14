@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from typing import Dict, Optional, List
 
-from database import get_all_tasks, create_task, delete_task, update_task
+from database import get_all_tasks, create_task, delete_task, update_task, init_db
 from model_manager import model_manager
 
 load_dotenv()
