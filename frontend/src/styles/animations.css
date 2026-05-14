@@ -1,0 +1,38 @@
+@keyframes pulse-ring {
+  0%   { transform: scale(1);   opacity: .6; }
+  100% { transform: scale(1.7); opacity: 0;  }
+}
+
+@keyframes wave {
+  0%, 100% { transform: scaleY(0.3); }
+  50%       { transform: scaleY(1);  }
+}
+
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0);    }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; } to { opacity: 1; }
+}
+
+@keyframes thinking-dot {
+  0%, 80%, 100% { transform: scale(0); opacity: 0; }
+  40%            { transform: scale(1); opacity: 1; }
+}
+
+@keyframes task-pop {
+  0%   { opacity: 0; transform: translateX(-10px) scale(0.97); }
+  100% { opacity: 1; transform: translateX(0)     scale(1);    }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(124,106,247,0.3); }
+  50%       { box-shadow: 0 0 40px rgba(124,106,247,0.6); }
+}
+
+@keyframes interrupt-flash {
+  0%   { background: rgba(247,106,138,0.15); }
+  100% { background: rgba(124,106,247,0.06); }
+}
