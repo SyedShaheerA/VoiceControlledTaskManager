@@ -331,7 +331,7 @@ Schema:
       "intent": "CREATE" | "UPDATE" | "DELETE" | "READ" | "CHAT",
       "target_task_id": <integer task ID for UPDATE/DELETE, or null>,
       "entities": {{
-        "title":        "Task title — required for CREATE",
+        "title":        "Task title — required for CREATE, optional for UPDATE (if renaming)",
         "time_context": "e.g. '7:00 AM' — required for CREATE, optional for UPDATE",
         "date_context": "e.g. 'today', 'tomorrow', 'YYYY-MM-DD' — required for CREATE, optional for UPDATE",
         "time_filter":  "morning|afternoon|evening|night|today|tomorrow|all — READ only"
@@ -412,6 +412,7 @@ Time-filter reference:
                         tid,
                         new_time=entities.get("time_context"),
                         new_date=entities.get("date_context"),
+                        new_title=entities.get("title"),  # <-- ADD THIS LINE
                     )
                     session["last_task_id"] = tid
                     matched = next((t for t in current_tasks if t.get("id") == tid), None)
