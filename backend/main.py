@@ -90,6 +90,77 @@ def build_last_task_hint(session: Dict) -> str:
 
     return "\n\n".join(parts)
 
+
+# ─── Semantic category map ─────────────────────────────────────────────────────
+# Maps common spoken concepts → keywords likely found in task titles
+SEMANTIC_CATEGORIES = {
+    "workout":    ["workout", "gym", "exercise", "run", "running", "training", "fitness",
+                   "yoga", "pilates", "crossfit", "lift", "weights", "jog", "swim", "cycling", "bike"],
+    "meeting":    ["meeting", "meet", "sync", "call", "standup", "stand-up", "catch-up",
+                   "catchup", "1:1", "one on one", "interview", "review", "session"],
+    "linkedin":   ["linkedin", "post", "social", "content", "publish", "share"],
+    "email":      ["email", "mail", "inbox", "reply", "respond", "message"],
+    "lunch":      ["lunch", "eat", "food", "meal", "dinner", "breakfast", "coffee", "cafe"],
+    "doctor":     ["doctor", "dentist", "appointment", "checkup", "clinic", "hospital", "physio"],
+    "study":      ["study", "read", "reading", "course", "class", "lecture", "homework", "revision"],
+    "errand":     ["errand", "shop", "shopping", "grocery", "groceries", "bank", "pickup"],
+    "travel":     ["travel", "flight", "commute", "drive", "uber", "taxi", "train", "bus"],
+}
+
+def build_semantic_hint(user_text: str, tasks: list) -> str:
+    """
+    Detects semantic concepts in the user utterance and finds tasks
+    whose titles match those concepts. Injects a targeted hint so
+    Gemini can resolve vague references like 'my evening workout'.
+    """
+    text_lower = user_text.lower()
+    matched_tasks = {}  # task_id → task
+
+    for concept, keywords in SEMANTIC_CATEGORIES.items():
+        if any(kw in text_lower for kw in keywords):
+            # Find tasks whose title contains any keyword from this category
+            for task in tasks:
+                title_lower = task["title"].lower()
+                if any(kw in title_lower for kw in keywords):
+                    matched_tasks[task["id"]] = task
+
+    # Also apply time-period narrowing from the utterance
+    time_filters = {
+        "morning":   lambda t: (parse_minutes(t) or 9999) < 720,    # before 12:00
+        "afternoon": lambda t: 720 <= (parse_minutes(t) or 0) < 1020,
+        "evening":   lambda t: 1020 <= (parse_minutes(t) or 0) < 1260,
+        "night":     lambda t: (parse_minutes(t) or 0) >= 1260,
+    }
+    active_filter = None
+    for period, fn in time_filters.items():
+        if period in text_lower:
+            active_filter = fn
+            break
+
+    if active_filter and matched_tasks:
+        narrowed = {
+            tid: t for tid, t in matched_tasks.items()
+            if active_filter(t.get("time_context", ""))
+        }
+        if narrowed:
+            matched_tasks = narrowed
+
+    if not matched_tasks:
+        return ""
+
+    task_list = "\n".join(
+        f"  - '{t['title']}' at {t['time_context']} on {t.get('date_context','today')} (ID: {t['id']})"
+        for t in matched_tasks.values()
+    )
+    return (
+        f"\n\n*** SEMANTIC MATCH ***"
+        f"\nThe user said '{user_text}'. Based on semantic analysis, the most likely "
+        f"task(s) they are referring to:\n{task_list}"
+        f"\nUse the ID from this list as target_task_id. If only one match, use it directly."
+        f"\nIf multiple matches exist, pick the one that best fits the time period mentioned."
+        f"\n*** END SEMANTIC MATCH ***"
+    )
+
 def resolve_confirmation(text: str) -> Optional[bool]:
     """
     Returns True = confirmed, False = cancelled, None = unrelated input.
@@ -210,9 +281,7 @@ async def chat_endpoint(
     formatted_history = "\n".join(f"{m['role'].upper()}: {m['text']}" for m in session["history"])
     hint_block        = build_last_task_hint(session)
 
-    # ── Pre-resolve: fuzzy time match for DELETE before calling AI ───────────
-    # If the user mentions a time that doesn't match any task exactly,
-    # find the closest one server-side and inject it so Gemini always has a real ID.
+    # ── Pre-resolve 1: fuzzy time match ──────────────────────────────────────
     import re as _re
     _time_pat = _re.search(
         r"\b(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))\b", request.text
@@ -221,7 +290,6 @@ async def chat_endpoint(
     if _time_pat:
         _req_time = _time_pat.group(1)
         _req_mins = parse_minutes(_req_time)
-        # Check if any task matches exactly
         _exact = any(
             parse_minutes(t.get("time_context","")) == _req_mins
             for t in current_tasks
@@ -238,12 +306,15 @@ async def chat_endpoint(
                     f"\n*** END FUZZY TIME MATCH ***"
                 )
 
+    # ── Pre-resolve 2: semantic concept match ─────────────────────────────────
+    _semantic_hint = build_semantic_hint(request.text, current_tasks)
+
     system_prompt = f"""
 You are an intelligent Voice Task Manager. You MUST handle multiple actions in a single response when the user asks for them.
 
 {datetime_context}
 
-{hint_block}{_fuzzy_hint}
+{hint_block}{_fuzzy_hint}{_semantic_hint}
 
 Current tasks in the database:
 {json.dumps(current_tasks, indent=2)}
@@ -292,6 +363,12 @@ Rules — READ CAREFULLY:
 7. Vague references ('the previous one', 'it', 'that', 'the second one'):
    Resolve using the CRITICAL CONTEXT and LAST READ LIST hints above.
    Never invent task IDs.
+
+8. Semantic references ('my workout', 'the meeting', 'evening run', 'the LinkedIn thing'):
+   Resolve using the SEMANTIC MATCH hint above when present.
+   Match by concept, not exact wording — 'gym session' matches a task called 'Morning Workout'.
+   If a time period is mentioned ('evening workout'), use it to narrow among multiple matches.
+   Always prefer the SEMANTIC MATCH hint ID over guessing from the task title alone.
 
 Time-filter reference:
 - morning   → before 12 PM
