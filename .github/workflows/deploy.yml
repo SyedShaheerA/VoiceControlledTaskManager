@@ -37,8 +37,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          # This points to the dist folder inside your frontend directory
-          path: './frontend/' 
+          # This must point to the dist folder INSIDE the frontend folder
+          path: 'frontend/dist' 
 
       - name: Deploy to GitHub Pages
         id: deployment
