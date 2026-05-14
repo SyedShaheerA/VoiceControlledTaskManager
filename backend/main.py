@@ -109,6 +109,52 @@ def resolve_confirmation(text: str) -> Optional[bool]:
         return None
     return last_confirm > last_cancel
 
+
+def parse_minutes(time_str: str) -> Optional[int]:
+    """Convert a time string like '11:05 AM', '9 PM', '14:30' to total minutes since midnight."""
+    import re
+    if not time_str:
+        return None
+    s = time_str.strip().upper()
+    # Try HH:MM AM/PM
+    m = re.match(r"(\d{1,2}):(\d{2})\s*(AM|PM)?", s)
+    if m:
+        h, mn, period = int(m.group(1)), int(m.group(2)), m.group(3)
+        if period == "PM" and h != 12: h += 12
+        if period == "AM" and h == 12: h = 0
+        return h * 60 + mn
+    # Try H AM/PM (no minutes)
+    m = re.match(r"(\d{1,2})\s*(AM|PM)", s)
+    if m:
+        h, period = int(m.group(1)), m.group(2)
+        if period == "PM" and h != 12: h += 12
+        if period == "AM" and h == 12: h = 0
+        return h * 60
+    return None
+
+def find_closest_task(requested_time: str, tasks: list, threshold_minutes: int = 60) -> Optional[dict]:
+    """
+    Returns the task whose time_context is closest to requested_time,
+    only if within threshold_minutes. Returns None if no close match.
+    """
+    req_mins = parse_minutes(requested_time)
+    if req_mins is None:
+        return None
+
+    best_task  = None
+    best_delta = threshold_minutes + 1
+
+    for task in tasks:
+        task_mins = parse_minutes(task.get("time_context", ""))
+        if task_mins is None:
+            continue
+        delta = abs(task_mins - req_mins)
+        if delta < best_delta:
+            best_delta = delta
+            best_task  = task
+
+    return best_task if best_task else None
+
 # ─── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/api/tasks")
 async def get_tasks_endpoint():
@@ -164,12 +210,40 @@ async def chat_endpoint(
     formatted_history = "\n".join(f"{m['role'].upper()}: {m['text']}" for m in session["history"])
     hint_block        = build_last_task_hint(session)
 
+    # ── Pre-resolve: fuzzy time match for DELETE before calling AI ───────────
+    # If the user mentions a time that doesn't match any task exactly,
+    # find the closest one server-side and inject it so Gemini always has a real ID.
+    import re as _re
+    _time_pat = _re.search(
+        r"\b(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))\b", request.text
+    )
+    _fuzzy_hint = ""
+    if _time_pat:
+        _req_time = _time_pat.group(1)
+        _req_mins = parse_minutes(_req_time)
+        # Check if any task matches exactly
+        _exact = any(
+            parse_minutes(t.get("time_context","")) == _req_mins
+            for t in current_tasks
+        )
+        if not _exact and _req_mins is not None:
+            _closest = find_closest_task(_req_time, current_tasks, threshold_minutes=90)
+            if _closest:
+                _fuzzy_hint = (
+                    f"\n*** FUZZY TIME MATCH ***"
+                    f"\nThe user asked about a task at {_req_time} but NO task exists at that exact time."
+                    f"\nThe CLOSEST task is: '{_closest['title']}' at {_closest['time_context']} (ID: {_closest['id']})."
+                    f"\nIf the user intent is DELETE or UPDATE, use ID {_closest['id']} as target_task_id."
+                    f"\nDo NOT say the task was not found. Instead use this closest match."
+                    f"\n*** END FUZZY TIME MATCH ***"
+                )
+
     system_prompt = f"""
 You are an intelligent Voice Task Manager. You MUST handle multiple actions in a single response when the user asks for them.
 
 {datetime_context}
 
-{hint_block}
+{hint_block}{_fuzzy_hint}
 
 Current tasks in the database:
 {json.dumps(current_tasks, indent=2)}
@@ -267,22 +341,46 @@ Time-filter reference:
                     session["last_task_title"] = matched["title"] if matched else None
 
             elif intent == "DELETE":
-                if tid:
-                    matched = next((t for t in current_tasks if t.get("id") == tid), None)
-                    if matched:
-                        # Ask for confirmation before deleting
-                        session["pending_delete"] = tid
+                import re as _re2
+                # ── Step 1: exact match by ID Gemini provided ──────────────────
+                matched = next((t for t in current_tasks if t.get("id") == tid), None) if tid else None
+
+                # ── Step 2: fallback — fuzzy match from raw utterance ──────────
+                if not matched:
+                    _tp = _re2.search(r"\b(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))\b", request.text)
+                    _rts = _tp.group(1) if _tp else ""
+                    matched = find_closest_task(_rts, current_tasks, threshold_minutes=90) if _rts else None
+
+                if matched:
+                    # ── Step 3: always confirm before deleting ─────────────────
+                    req_time_str = ""
+                    _tp2 = _re2.search(r"\b(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))\b", request.text)
+                    if _tp2:
+                        req_time_str = _tp2.group(1)
+
+                    exact_match = parse_minutes(req_time_str) == parse_minutes(matched["time_context"]) if req_time_str else True
+
+                    if exact_match:
                         confirm_msg = (
                             f"Just to confirm — delete '{matched['title']}' "
                             f"at {matched['time_context']}? Say yes to confirm or no to cancel."
                         )
-                        session["history"].append({"role": "agent", "text": confirm_msg})
-                        return ChatResponse(
-                            intent="CLARIFICATION",
-                            tts_response=confirm_msg,
-                            session_id=session_id,
-                            model_used=model_used,
+                    else:
+                        confirm_msg = (
+                            f"I couldn't find a task at {req_time_str}. "
+                            f"Did you mean '{matched['title']}' at {matched['time_context']}? "
+                            f"Say yes to delete it or no to cancel."
                         )
+
+                    session["pending_delete"] = matched["id"]
+                    session["history"].append({"role": "agent", "text": confirm_msg})
+                    return ChatResponse(
+                        intent="CLARIFICATION",
+                        tts_response=confirm_msg,
+                        session_id=session_id,
+                        model_used=model_used,
+                    )
+                # else: nothing found at all — fall through, AI tts_response handles it
 
             elif intent == "READ":
                 read_ids   = action.get("read_task_ids", [])
